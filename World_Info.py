@@ -1,7 +1,7 @@
 from airflow import DAG
 from airflow.decorators import task
 from airflow.providers.postgres.hooks.postgres import PostgresHook
-from datetime import datetime
+from datetime import datetime, timedelta
 from pandas import Timestamp
 
 import requests
@@ -10,9 +10,7 @@ import logging
 
 def get_Redshift_connection(autocommit=True):
     hook = PostgresHook(postgres_conn_id='redshift_dev_db')
-    conn = hook.get_conn()
-    conn.autocommit = autocommit
-    return conn.cursor()
+    return hook.get_conn().cursor()
 
 @task
 def get_info():
@@ -30,12 +28,15 @@ def get_data(data):
         area = country_data.get("area", 0)
 
         countries_info.append({'country_name': country_name, 'population': population, 'area': area})
-    return pd.DataFrame(countries_info)
+    return countries_info
 
 @task
 def load(schema, table, countries_info):
     logging.info("load started")
     cur = get_Redshift_connection()
+
+    countries_info_df = pd.DataFrame(countries_info)
+
     try:
         cur.execute('BEGIN;')
         cur.execute(f"DROP TABLE IF EXISTS {schema}.{table};")
@@ -45,10 +46,10 @@ CREATE TABLE {schema}.{table}(
     population bigint,
     area float
 );""")
-        for index, row in countries_info.iterrows():
-            sql = f"INSERT INTO {schema}.{table} VALUES ('{row['country_name']}', {row['population']}, {row['area']});"
+        for index, row in countries_info_df.iterrows():
+            sql = f"INSERT INTO {schema}.{table} VALUES (%s, %s, %s);"
             print(sql)
-            cur.execute(sql)
+            cur.execute(sql, (row['country_name'], row['population'], row['area']))
         cur.execute("COMMIT;")
     except Exception as error:
         print(error)
@@ -61,7 +62,11 @@ with DAG(
     start_date = datetime(2023,5,30),
     catchup = False,
     tags = ['API'],
-    schedule = '30 6 * * 6'
+    schedule = '30 6 * * 6',
+    default_args={
+        'retries': 5,
+        'retry_delay': timedelta(minutes=1)
+    }
 ) as dag:
     country_info = get_info()
     country_info_df = get_data(country_info)
